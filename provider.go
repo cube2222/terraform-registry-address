@@ -9,6 +9,7 @@ import (
 
 	svchost "github.com/hashicorp/terraform-svchost"
 	"golang.org/x/net/idna"
+	"oras.land/oras-go/v2/registry"
 )
 
 // Provider encapsulates a single provider type. In the future this will be
@@ -17,6 +18,7 @@ type Provider struct {
 	Type      string
 	Namespace string
 	Hostname  svchost.Hostname
+	IsOCI     bool
 }
 
 // DefaultProviderRegistryHost is the hostname used for provider addresses that do
@@ -56,7 +58,11 @@ func (pt Provider) String() string {
 	if pt.IsZero() {
 		panic("called String on zero-value addrs.Provider")
 	}
-	return pt.Hostname.ForDisplay() + "/" + pt.Namespace + "/" + pt.Type
+	ociPrefix := ""
+	if pt.IsOCI {
+		ociPrefix = "oci:"
+	}
+	return ociPrefix + pt.Hostname.ForDisplay() + "/" + pt.Namespace + "/" + pt.Type
 }
 
 // ForDisplay returns a user-friendly FQN string, simplified for readability. If
@@ -182,13 +188,36 @@ func (pt Provider) Equals(other Provider) bool {
 // terraform-config-inspect.
 //
 // The following are valid source string formats:
-// 		name
-// 		namespace/name
-// 		hostname/namespace/name
+//
+//	name
+//	namespace/name
+//	hostname/namespace/name
 //
 // "name"-only format is parsed as -/name (i.e. legacy namespace)
 // requiring further identification of the namespace via Registry API
 func ParseProviderSource(str string) (Provider, error) {
+	if strings.HasPrefix(str, "oci:") {
+		repositoryRef := strings.TrimPrefix(str, "oci:")
+		parsed, err := registry.ParseReference(repositoryRef)
+		if err != nil {
+			return Provider{}, fmt.Errorf("could not parse oci reference: %w", err)
+		}
+
+		repositoryParts := strings.Split(parsed.Repository, "/") // We expect repositories to be of the form `namespace/type`
+
+		hostname, err := svchost.ForComparison(parsed.Registry)
+		if err != nil {
+			return Provider{}, fmt.Errorf("could not parse registry host: %w", err)
+		}
+
+		return Provider{
+			Type:      repositoryParts[1],
+			Namespace: repositoryParts[0],
+			Hostname:  hostname,
+			IsOCI:     true,
+		}, nil
+	}
+
 	var ret Provider
 	parts, err := parseSourceStringParts(str)
 	if err != nil {
@@ -296,7 +325,7 @@ func ParseProviderSource(str string) (Provider, error) {
 
 // MustParseProviderSource is a wrapper around ParseProviderSource that panics if
 // it returns an error.
-func MustParseProviderSource(raw string) (Provider) {
+func MustParseProviderSource(raw string) Provider {
 	p, err := ParseProviderSource(raw)
 	if err != nil {
 		panic(err)
